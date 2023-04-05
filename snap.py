@@ -13,6 +13,72 @@ from vectorization import close_curve_for_snap
 from collections import defaultdict
 import sys
 import warnings
+import os
+from loader import load, build_sketch
+
+filename = sys.argv[1] if len(sys.argv) > 1 else 'default.png'
+detect_corner = bool(sys.argv[2]) if len(sys.argv) > 2 else False
+path = os.path.join('img', filename)
+original = cv2.imread(path)
+img = copy.deepcopy(original)
+sample = load(original)
+path = os.path.join('img', f'out_{filename}')
+cv2.imwrite(path, sample)
+H, W = sample.shape[:2]
+contour, _ = build_sketch(sample)
+contour = [edge for edge in contour if len(edge) >= 3]
+tangent = [[] for _ in range(len(contour))]
+length = [[] for _ in range(len(contour))]
+user_input = []
+pixel_contour = copy.deepcopy(contour)
+
+if detect_corner:
+    # 将图像转为灰度图
+    gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite('gray.png', gray)
+    # 设定Shi-Tomasi角点检测的参数
+    maxCorners = 100
+    qualityLevel = 0.01
+    minDistance = 10
+    blockSize = 3
+    k = 0.15
+    # 进行Shi-Tomasi角点检测
+    corners = cv2.goodFeaturesToTrack(gray, maxCorners, qualityLevel, minDistance, blockSize, useHarrisDetector=True, k=k)
+    for corner in corners:
+        x, y = corner.ravel()
+        x = int(x)
+        y = int(y)
+        # cv2.circle(original, (int(x), int(y)), 3, (0, 0, 255), -1)
+        d = 1e8
+        idx = 0
+        for i, p in enumerate(contour):
+            d2 = np.sqrt((p[0]-y)**2+(p[1]-x)**2) # 注意返回的x,y代表横纵坐标
+            if d2 < d:
+                d = d2
+                idx = i
+        original[contour[idx][0], contour[idx][1]] = [0, 0, 255]
+        contours = []
+        contour2 = []
+        start = 0
+        for i, p in enumerate(contour):
+            if (original[p[0], p[1]] == [0, 0, 255]).all():
+                start = i
+                break
+        start += 1
+        for i in range(start, start + len(contour)):
+            p = contour[i % len(contour)]
+            contour2.append(p)
+            if (original[p[0], p[1]] == [0, 0, 255]).all():
+                contours.append(contour2)
+                contour2 = []
+
+        for contour in contours:
+            b, g, r = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+            for i, p in enumerate(contour):
+                original[p[0], p[1]] = [b, g, r]
+        cv2.imwrite('Corner_Detection.png', original)
+
+
 
 def distance(p1, p2):
     """
@@ -52,31 +118,6 @@ def adjacency_list(coords, threshold):
                 adj_list[i].append(j)
                 adj_list[j].append(i)
     return adj_list
-
-contour = []
-tangent = []
-pixel_contour = []
-user_input = []
-# with open('Lpoint.txt') as f:
-filename = sys.argv[1] if len(sys.argv) > 1 else 'corner.txt'
-with open(filename, 'r') as f:
-    hw = f.readline().strip().split()
-    hw = [int(_) for _ in hw]
-    H, W = hw[0], hw[1]
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    n = int(f.readline().strip())
-    for i in range(n):
-        data = f.readline().strip().split()
-        data = [int(_) for _ in data]
-        edge = [[data[i], data[i+1]] for i in range(0, len(data), 2)]
-        if len(edge) > 0:
-            contour.append(edge)
-            tangent.append([])
-        b, g, r = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-        for j in range(0, len(data), 2):
-            x, y = data[j], data[j + 1]
-            img[x, y, :] = [b, g, r]
-pixel_contour = copy.deepcopy(contour)
 
 
 win = Tk()
@@ -132,6 +173,16 @@ def resample(i, edge):
     contour[i] = [[x[_], y[_]] for _ in range(len(x))]
     tangent[i] = [splev(t[0], tck, der=1), splev(t[-1], tck, der=1)]
 
+    def integrand(u):
+        # 求解曲线在u处的导数
+        dxdu, dydu = splev(u, tck, der=1)
+        # 返回导数的模长
+        return np.sqrt(dxdu ** 2 + dydu ** 2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        length[i], _ = quad(integrand, t[0], t[-1])
+
 
 def get_sublist(lst, start, length):
     end = start + length
@@ -142,7 +193,9 @@ def get_sublist(lst, start, length):
 
 def match(idx):
     if len(contour[idx]) > len(contour[-1]):
-        return -1, -1e3
+        tmp = contour[idx][:len(contour[-1])] 
+    else:
+        tmp = contour[idx]
     l = len(contour[idx])
     dd = []
     for i in range(len(contour[-1])):
@@ -153,15 +206,18 @@ def match(idx):
 for i, edge in enumerate(contour):
     resample(i, edge)
 
-threshold = 15
-adj_list = adjacency_list(contour, threshold)
 
-for i in range(len(adj_list)):
-    adj_list[i] = list(set(adj_list[i]))
-    print(i, adj_list[i])
+
+threshold = 15 # 两点距离若小于该阈值则认为是相邻的
+threshold2 = 20 # 两条边的豪斯多夫距离若小于该阈值则认为是接近的
+# global_adj_list = adjacency_list(contour, threshold)
+
+# for i in range(len(adj_list)):
+#     global_adj_list[i] = list(set(global_adj_list[i]))
 
 contour.append(user_input) # 加入空的user_input占位
 tangent.append([])
+length.append([])
 curvature = [[] for i in range(len(contour))]
 
 fig, ax = plt.subplots()
@@ -174,8 +230,6 @@ for i, edge in enumerate(contour):
 plt.show()
 
 complete_pair = []
-
-    
 
 start_move = 0
 ovals = []
@@ -220,15 +274,10 @@ def on_key_press(event):
         s, d_hd = match(i)
         ss.append(s)
         dd.append(d_hd)
-
     res = []
     for i in range(len(dd)):
-        if dd[i] != -1e3 and dd[i] < 20:
+        if dd[i] < min(threshold2, 0.7 * length[i]):
             res.append(i)
-            for p in pixel_contour[i]:
-                y, x = p[0], p[1]
-                oval = canvas.create_oval(x, y, x, y, outline='red', fill='red', width=1)
-                ovals.append(oval)
     seq = []
     for p in contour[-1]:
         mn = 1e8
@@ -241,6 +290,11 @@ def on_key_press(event):
         if u != -1 and u not in seq:
             seq.append(u)
     print('seq', seq)
+    for i in seq:
+        for p in pixel_contour[i]:
+            y, x = p[0], p[1]
+            oval = canvas.create_oval(x, y, x, y, outline='red', fill='red', width=1)
+            ovals.append(oval)
     ex_dict = defaultdict(list)
     for i in range(len(seq)):
         c1 = contour[seq[i]]
