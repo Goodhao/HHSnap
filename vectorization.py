@@ -272,7 +272,6 @@ def close_curve_for_snap(V, design_part):
     for p in design_part:
         bound = max(bound, np.sqrt((p[0] - V[0][0]) ** 2 + (p[1] - V[0][1]) ** 2))
     bounds = [(0, bound), (0, bound)]
-    print(0.5 * bound)
     res = minimize(objective_for_snap, [0.5 * bound, 0.5 * bound], args=(V, design_part), method='powell', bounds=bounds)
     alpha = np.squeeze(res.x)
     # print('alpha', alpha)
@@ -285,6 +284,6 @@ def close_curve_for_snap(V, design_part):
     b = [v0[1], v1[1], v2[1], v3[1]]
     nodes = np.asfortranarray([a, b])
     new_curve = bezier.Curve(nodes, degree=3)
-    u = np.linspace(0.0, 1.0, 100)
+    u = np.linspace(0.0, 1.0, 500)
     new_curve = np.transpose(new_curve.evaluate_multi(u)).tolist()
     return new_curve, [v0, v1, v2, v3], res.fun

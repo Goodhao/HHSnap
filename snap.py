@@ -8,16 +8,22 @@ import random
 from scipy.interpolate import splprep, splev
 from scipy.spatial.distance import directed_hausdorff
 from scipy.integrate import quad
-from datetime import datetime
+import time
 from vectorization import close_curve_for_snap
 from collections import defaultdict
 import sys
 import warnings
 import os
 from loader import load, build_sketch
+import argparse
 
-filename = sys.argv[1] if len(sys.argv) > 1 else 'default.png'
-detect_corner = bool(sys.argv[2]) if len(sys.argv) > 2 else False
+parser = argparse.ArgumentParser(description='HHSnap')
+parser.add_argument('--input', dest='filename', type=str, help='输入文件名，要求存放在img文件夹下')
+parser.add_argument('--detect_corner', dest='detect_corner', help='是否检测图片的角点')
+args = parser.parse_args()
+
+filename = args.filename
+detect_corner = bool(args.detect_corner) if args.detect_corner else False
 path = os.path.join('img', filename)
 original = cv2.imread(path)
 img = copy.deepcopy(original)
@@ -27,15 +33,9 @@ cv2.imwrite(path, sample)
 H, W = sample.shape[:2]
 contour, _ = build_sketch(sample)
 contour = [edge for edge in contour if len(edge) >= 3]
-tangent = [[] for _ in range(len(contour))]
-length = [[] for _ in range(len(contour))]
-user_input = []
-pixel_contour = copy.deepcopy(contour)
-
 if detect_corner:
     # 将图像转为灰度图
     gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-    cv2.imwrite('gray.png', gray)
     # 设定Shi-Tomasi角点检测的参数
     maxCorners = 100
     qualityLevel = 0.01
@@ -50,34 +50,46 @@ if detect_corner:
         y = int(y)
         # cv2.circle(original, (int(x), int(y)), 3, (0, 0, 255), -1)
         d = 1e8
-        idx = 0
-        for i, p in enumerate(contour):
-            d2 = np.sqrt((p[0]-y)**2+(p[1]-x)**2) # 注意返回的x,y代表横纵坐标
-            if d2 < d:
-                d = d2
-                idx = i
-        original[contour[idx][0], contour[idx][1]] = [0, 0, 255]
-        contours = []
-        contour2 = []
-        start = 0
-        for i, p in enumerate(contour):
+        idx1 = 0
+        idx2 = 0
+        for j, edge in enumerate(contour):
+            for i, p in enumerate(edge):
+                d2 = np.sqrt((p[0]-y)**2+(p[1]-x)**2) # 注意返回的x,y代表横纵坐标
+                if d2 < d:
+                    d = d2
+                    idx1, idx2 = j, i
+        original[contour[idx1][idx2][0], contour[idx1][idx2][1]] = [0, 0, 255]
+    for j, edge in enumerate(contour):
+        start = -1
+        for i, p in enumerate(edge):
             if (original[p[0], p[1]] == [0, 0, 255]).all():
                 start = i
                 break
+        if start == -1:
+            continue
         start += 1
-        for i in range(start, start + len(contour)):
-            p = contour[i % len(contour)]
-            contour2.append(p)
+        edge2 = []
+        contour2 = []
+        for i in range(start, start + len(edge)):
+            p = edge[i % len(edge)]
+            edge2.append(p)
             if (original[p[0], p[1]] == [0, 0, 255]).all():
-                contours.append(contour2)
-                contour2 = []
+                contour2.append(edge2)
+                edge2 = []
+        contour.pop(j)
+        for edge in contour2:
+            contour.append(edge)
 
-        for contour in contours:
-            b, g, r = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-            for i, p in enumerate(contour):
-                original[p[0], p[1]] = [b, g, r]
-        cv2.imwrite('Corner_Detection.png', original)
+    for edge in contour:
+        b, g, r = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+        for i, p in enumerate(edge):
+            original[p[0], p[1]] = [b, g, r]
+    # cv2.imwrite('Corner_Detection.png', original)
 
+tangent = [[] for _ in range(len(contour))]
+length = [[] for _ in range(len(contour))]
+user_input = []
+pixel_contour = copy.deepcopy(contour)
 
 
 def distance(p1, p2):
@@ -124,7 +136,7 @@ win = Tk()
 win.geometry(f'{W}x{H}')
 canvas = Canvas(win, width=W, height=H)
 canvas.pack()
-bg = ImageTk.PhotoImage(Image.fromarray(img))
+bg = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
 canvas.create_image(W/2, H/2, image=bg, anchor='center')
 canvas_img_id = canvas.find_all()[0]
 
@@ -133,28 +145,6 @@ canvas_img_id = canvas.find_all()[0]
 # 弧长步长
 ds = 5
 
-def bisection(start, tck):
-    def integrand(u):
-        # 求解曲线在u处的导数
-        dxdu, dydu = splev(u, tck, der=1)
-        # 返回导数的模长
-        return np.sqrt(dxdu ** 2 + dydu ** 2)
-
-    l = start
-    r = 1
-    while l <= r and abs(r - l) > 1e-7:
-        x = (l + r) / 2
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            total_length, _ = quad(integrand, start, x)
-        if abs(total_length - ds) < 1e-3:
-            return x
-        if total_length > ds:
-            r = x
-        else:
-            l = x
-    return -1
-
 def resample(i, edge):
     global contour
     global curvature
@@ -162,26 +152,39 @@ def resample(i, edge):
     if len(edge) == 0:
         return
     tck, u = splprep(np.array(edge).T, k=3, s=100)
-    now = 0
-    t = [now]
-    while True:
-        now = bisection(now, tck)
-        if now == -1:
-            break
-        t.append(now)
-    x, y = splev(t, tck)
-    contour[i] = [[x[_], y[_]] for _ in range(len(x))]
-    tangent[i] = [splev(t[0], tck, der=1), splev(t[-1], tck, der=1)]
 
     def integrand(u):
         # 求解曲线在u处的导数
         dxdu, dydu = splev(u, tck, der=1)
         # 返回导数的模长
         return np.sqrt(dxdu ** 2 + dydu ** 2)
-
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        length[i], _ = quad(integrand, t[0], t[-1])
+        length[i], _ = quad(integrand, u.min(), u.max())
+
+    num_points = int(length[i] / ds) + 1
+
+    t = [u.min() + k * (u.max() - u.min()) / (num_points - 1) for k in range(num_points)]
+    p = [splev(u, tck) for u in t]
+    dis = [0 for k in range(num_points)]
+    max_iter = 100
+    for k in range(max_iter):
+        for j in range(1, num_points):
+            dis[j] = np.sqrt((p[j][0] - p[j-1][0]) ** 2 + (p[j][1] - p[j-1][1]) ** 2)
+        offset = 0
+        for j in range(1, num_points):
+            offset += dis[j] - ds
+            first_order = np.linalg.norm(splev(t[j], tck, der=1))
+            second_order = np.linalg.norm(splev(t[j], tck, der=2))
+            numerator = offset * first_order
+            denominator = offset * second_order + first_order * first_order
+            t[j] = t[j] - numerator / denominator
+            p[j] = splev(t[j], tck)
+
+    x, y = splev(t, tck)
+    contour[i] = [[x[_], y[_]] for _ in range(len(x))]
+    tangent[i] = [splev(t[0], tck, der=1), splev(t[-1], tck, der=1)]
+    
 
 
 def get_sublist(lst, start, length):
@@ -205,8 +208,6 @@ def match(idx):
 
 for i, edge in enumerate(contour):
     resample(i, edge)
-
-
 
 threshold = 15 # 两点距离若小于该阈值则认为是相邻的
 threshold2 = 20 # 两条边的豪斯多夫距离若小于该阈值则认为是接近的
@@ -266,7 +267,10 @@ def on_key_press(event):
     ovals = []
     start_move = 0
     contour[-1] = user_input
+    start_time = time.time()
     resample(len(contour) - 1, contour[-1])
+    end_time = time.time()
+    print(end_time - start_time, 's')
     user_tck, user_u = splprep(np.array(user_input).T, k=3, s=100)
     ss = []
     dd = []
@@ -278,6 +282,7 @@ def on_key_press(event):
     for i in range(len(dd)):
         if dd[i] < min(threshold2, 0.7 * length[i]):
             res.append(i)
+    print(res)
     seq = []
     for p in contour[-1]:
         mn = 1e8
@@ -367,20 +372,20 @@ def on_key_press(event):
             v2 = np.array(tangent[pair[0]][e1])
             v3 = np.array(contour[pair[1]][e2])
             v4 = np.array(tangent[pair[1]][e2])
-            fig, ax = plt.subplots()
             if e1 == 0:
                 v2 = -v2
             if e2 == 0:
                 v4 = -v4
             design_part = take_design_part(v1, v2, v3, user_tck, user_u)
-            plt.xlim(0, W)
-            plt.ylim(0, H)
-            for i, edge in enumerate(contour):
-                x, y = np.array([edge[_][0] for _ in range(len(edge))]), np.array([edge[_][1] for _ in range(len(edge))])
-                ax.plot(y, H - x)
-                ax.plot([pp[1] for pp in design_part], [H - pp[0] for pp in design_part], 'ro')
-                ax.plot(v2[1], H - v2[0], 'ro')
-            plt.show()
+            # fig, ax = plt.subplots()
+            # plt.xlim(0, W)
+            # plt.ylim(0, H)
+            # for i, edge in enumerate(contour):
+            #     x, y = np.array([edge[_][0] for _ in range(len(edge))]), np.array([edge[_][1] for _ in range(len(edge))])
+            #     ax.plot(y, H - x)
+            #     ax.plot([pp[1] for pp in design_part], [H - pp[0] for pp in design_part], 'ro')
+            #     ax.plot(v2[1], H - v2[0], 'ro')
+            # plt.show()
             v2 = v1 - v2 / np.linalg.norm(v2)
             v4 = v3 - v4 / np.linalg.norm(v4)
             res, _, _ = close_curve_for_snap([v1, v2, v4, v3], design_part)
