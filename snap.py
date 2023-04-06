@@ -166,24 +166,26 @@ def resample(i, edge):
 
     t = [u.min() + k * (u.max() - u.min()) / (num_points - 1) for k in range(num_points)]
     p = [splev(u, tck) for u in t]
-    dis = [0 for k in range(num_points)]
-    max_iter = 100
-    for k in range(max_iter):
-        for j in range(1, num_points):
-            dis[j] = np.sqrt((p[j][0] - p[j-1][0]) ** 2 + (p[j][1] - p[j-1][1]) ** 2)
-        offset = 0
-        for j in range(1, num_points):
-            offset += dis[j] - ds
+    max_iter = 50
+    last_offset = 0
+    for j in range(1, num_points):
+        for k in range(max_iter):
+            dis = np.sqrt((p[j][0] - p[j-1][0]) ** 2 + (p[j][1] - p[j-1][1]) ** 2)
+            offset = last_offset + dis - ds
             first_order = np.linalg.norm(splev(t[j], tck, der=1))
             second_order = np.linalg.norm(splev(t[j], tck, der=2))
             numerator = offset * first_order
             denominator = offset * second_order + first_order * first_order
             t[j] = t[j] - numerator / denominator
+            t[j] = np.clip(t[j], t[j-1], u.max())
             p[j] = splev(t[j], tck)
+        dis = np.sqrt((p[j][0] - p[j-1][0]) ** 2 + (p[j][1] - p[j-1][1]) ** 2)
+        last_offset = last_offset + dis - ds
 
     x, y = splev(t, tck)
     contour[i] = [[x[_], y[_]] for _ in range(len(x))]
     tangent[i] = [splev(t[0], tck, der=1), splev(t[-1], tck, der=1)]
+    return p
     
 
 
@@ -199,10 +201,10 @@ def match(idx):
         tmp = contour[idx][:len(contour[-1])] 
     else:
         tmp = contour[idx]
-    l = len(contour[idx])
+    l = len(tmp)
     dd = []
     for i in range(len(contour[-1])):
-        dd.append(directed_hausdorff(contour[idx], get_sublist(contour[-1], i, l))[0])
+        dd.append(directed_hausdorff(tmp, get_sublist(contour[-1], i, l))[0])
     assert len(dd) > 0
     return np.argmin(dd), np.min(dd)
 
@@ -268,9 +270,10 @@ def on_key_press(event):
     start_move = 0
     contour[-1] = user_input
     start_time = time.time()
-    resample(len(contour) - 1, contour[-1])
+    ppp = resample(len(contour) - 1, contour[-1])
     end_time = time.time()
     print(end_time - start_time, 's')
+
     user_tck, user_u = splprep(np.array(user_input).T, k=3, s=100)
     ss = []
     dd = []
@@ -282,7 +285,6 @@ def on_key_press(event):
     for i in range(len(dd)):
         if dd[i] < min(threshold2, 0.7 * length[i]):
             res.append(i)
-    print(res)
     seq = []
     for p in contour[-1]:
         mn = 1e8
