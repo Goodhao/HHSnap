@@ -1,9 +1,5 @@
-from tkinter import *
-from PIL import Image, ImageTk
-import cv2
 import numpy as np
 import copy
-import matplotlib.pyplot as plt
 import random
 from scipy.interpolate import splprep, splev
 from scipy.spatial.distance import directed_hausdorff
@@ -13,87 +9,16 @@ from vectorization import close_curve_for_snap
 from collections import defaultdict
 import sys
 import warnings
+import win32pipe, win32file
 import os
-from loader import load, build_sketch
-import argparse
+from shapely.geometry import MultiLineString, LineString
+import traceback
 
-parser = argparse.ArgumentParser(description='HHSnap')
-parser.add_argument('--input', dest='filename', type=str, help='输入文件名，要求存放在img文件夹下')
-parser.add_argument('--detect_corner', dest='detect_corner', help='是否检测图片的角点')
-args = parser.parse_args()
 
-filename = args.filename
-detect_corner = bool(args.detect_corner) if args.detect_corner else False
-path = os.path.join('img', filename)
-original = cv2.imread(path)
-img = copy.deepcopy(original)
-sample = load(original)
-path = os.path.join('img', f'out_{filename}')
-cv2.imwrite(path, sample)
-H, W = sample.shape[:2]
-contour, _ = build_sketch(sample)
-contour = [edge for edge in contour if len(edge) > 3]
-if detect_corner:
-    # 将图像转为灰度图
-    gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-    # 设定Shi-Tomasi角点检测的参数
-    maxCorners = 100
-    qualityLevel = 0.01
-    minDistance = 10
-    blockSize = 3
-    k = 0.15
-    # 进行Shi-Tomasi角点检测
-    corners = cv2.goodFeaturesToTrack(gray, maxCorners, qualityLevel, minDistance, blockSize, useHarrisDetector=True, k=k)
-    for corner in corners:
-        x, y = corner.ravel()
-        x = int(x)
-        y = int(y)
-        # cv2.circle(original, (int(x), int(y)), 3, (0, 0, 255), -1)
-        d = 1e8
-        idx1 = 0
-        idx2 = 0
-        for j, edge in enumerate(contour):
-            for i, p in enumerate(edge):
-                d2 = np.sqrt((p[0]-y)**2+(p[1]-x)**2) # 注意返回的x,y代表横纵坐标
-                if d2 < d:
-                    d = d2
-                    idx1, idx2 = j, i
-        original[contour[idx1][idx2][0], contour[idx1][idx2][1]] = [0, 0, 255]
-    for j, edge in enumerate(contour):
-        start = -1
-        for i, p in enumerate(edge):
-            if (original[p[0], p[1]] == [0, 0, 255]).all():
-                start = i
-                break
-        if start == -1:
-            continue
-        start += 1
-        edge2 = []
-        contour2 = []
-        for i in range(start, start + len(edge)):
-            p = edge[i % len(edge)]
-            edge2.append(p)
-            if (original[p[0], p[1]] == [0, 0, 255]).all():
-                contour2.append(edge2)
-                edge2 = []
-        contour.pop(j)
-        for edge in contour2:
-            contour.append(edge)
-
-    for edge in contour:
-        b, g, r = random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-        for i, p in enumerate(edge):
-            original[p[0], p[1]] = [b, g, r]
-    # cv2.imwrite('Corner_Detection.png', original)
-
-tangent = [[] for _ in range(len(contour))]
-length = [[] for _ in range(len(contour))]
-user_input = []
+# 弧长步长
+ds = 5
 
 def distance(p1, p2):
-    """
-    计算两点之间的距离
-    """
     return np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 def closest_end(c1, c2, exclude1=[], exclude2=[]):
     d = []
@@ -102,8 +27,6 @@ def closest_end(c1, c2, exclude1=[], exclude2=[]):
     d.append(distance(c1[-1], c2[0]) if -1 not in exclude1 and 0 not in exclude2 else 1e8)
     d.append(distance(c1[-1], c2[-1]) if -1 not in exclude1 and -1 not in exclude2 else 1e8)
     i = np.argmin(d)
-    if d[i] == 1e8:
-        return -2, -2
     if i == 0:
         return 0, 0
     elif i == 1:
@@ -112,47 +35,11 @@ def closest_end(c1, c2, exclude1=[], exclude2=[]):
         return -1, 0
     else:
         return -1, -1
-def adjacency_list(coords, threshold):
-    """
-    为曲线计算邻接表
-    """
-    n = len(coords)
-    adj_list = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i+1, n):
-            # 计算曲线i和曲线j的端点之间的距离
-            d1 = distance(coords[i][0], coords[j][0])
-            d2 = distance(coords[i][0], coords[j][-1])
-            d3 = distance(coords[i][-1], coords[j][0])
-            d4 = distance(coords[i][-1], coords[j][-1])
-            # 如果距离不超过阈值，则将i和j加入彼此的邻接表中
-            if d1 <= threshold or d2 <= threshold or d3 <= threshold or d4 <= threshold:
-                adj_list[i].append(j)
-                adj_list[j].append(i)
-    return adj_list
 
-
-win = Tk()
-win.geometry(f'{W}x{H}')
-canvas = Canvas(win, width=W, height=H)
-canvas.pack()
-bg = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
-canvas.create_image(W/2, H/2, image=bg, anchor='center')
-canvas_img_id = canvas.find_all()[0]
-
-
-
-# 弧长步长
-ds = 5
-
-def resample(i, edge):
-    global contour
-    global tangent
-
+def resample(contour, tangent, length, i, edge):
     if len(edge) == 0:
         return
     tck, u = splprep(np.array(edge).T, k=3, s=100)
-
     def integrand(u):
         # 求解曲线在u处的导数
         dxdu, dydu = splev(u, tck, der=1)
@@ -186,57 +73,50 @@ def resample(i, edge):
     contour[i] = [[x[_], y[_]] for _ in range(len(x))]
     tangent[i] = [splev(t[0], tck, der=1), splev(t[-1], tck, der=1)]
 
+def filter_adj_same_point(edge):
+    res = []
+    for i, p in enumerate(edge):
+        if i > 0 and p == edge[i - 1]:
+            continue
+        res.append(p)
+    return res
 
-def get_sublist(lst, start, length):
-    end = start + length
-    if end <= len(lst):
-        return lst[start:end]
-    else:
-        return lst[start:] + lst[:end % len(lst)]
+def pre(contour):
+    contour = [filter_adj_same_point(edge) for edge in contour]
+    contour = [edge for edge in contour if len(edge) > 3]
+    tangent = [[] for _ in range(len(contour))]
+    length = [[] for _ in range(len(contour))]
+    user_input = []
 
-def match(idx):
-    if len(contour[idx]) > len(contour[-1]):
-        tmp = contour[idx][:len(contour[-1])] 
-    else:
-        tmp = contour[idx]
-    l = len(tmp)
-    dd = []
-    for i in range(len(contour[-1])):
-        dd.append(directed_hausdorff(tmp, get_sublist(contour[-1], i, l))[0])
-    assert len(dd) > 0
-    return np.argmin(dd), np.min(dd)
+    for i, edge in enumerate(contour):
+        resample(contour, tangent, length, i, edge)
+    contour.append(user_input)
+    tangent.append([])
+    length.append([])
+    return contour, tangent, length
 
-for i, edge in enumerate(contour):
-    resample(i, edge)
+def work(contour, tangent, length, user_input):
+    threshold = 15 # 两点距离若小于该阈值则认为是相邻的
+    threshold2 = 20 # 两条边的豪斯多夫距离若小于该阈值则认为是接近的
 
-threshold = 15 # 两点距离若小于该阈值则认为是相邻的
-threshold2 = 20 # 两条边的豪斯多夫距离若小于该阈值则认为是接近的
-# global_adj_list = adjacency_list(contour, threshold)
+    def get_sublist(lst, start, length):
+        end = start + length
+        if end <= len(lst):
+            return lst[start:end]
+        else:
+            return lst[start:] + lst[:end % len(lst)]
 
-# for i in range(len(adj_list)):
-#     global_adj_list[i] = list(set(global_adj_list[i]))
-
-contour.append(user_input) # 加入空的user_input占位
-tangent.append([])
-length.append([])
-
-fig, ax = plt.subplots()
-plt.xlim(0, W)
-plt.ylim(0, H)
-for i, edge in enumerate(contour):
-    x, y = np.array([edge[_][0] for _ in range(len(edge))]), np.array([edge[_][1] for _ in range(len(edge))])
-    ax.plot(y, H - x)
-    ax.text(np.mean(y) + 1, np.mean(H - x) + 1, f"{i}", ha="center", va="center", fontsize=12, color="red")
-plt.show()
-
-
-start_move = 0
-ovals = []
-def on_key_press(event):
-    global user_input
-    global contour
-    global ovals
-    global start_move
+    def match(idx):
+        if len(contour[idx]) > len(contour[-1]):
+            tmp = contour[idx][:len(contour[-1])] 
+        else:
+            tmp = contour[idx]
+        l = len(tmp)
+        dd = []
+        for i in range(len(contour[-1])):
+            dd.append(directed_hausdorff(tmp, get_sublist(contour[-1], i, l))[0])
+        assert len(dd) > 0
+        return np.argmin(dd), np.min(dd)
 
     def take_design_part(v1, v2, v3, user_tck, user_u):
         i1 = np.argmin([distance(user_input[j], v1) for j in range(len(user_input))])
@@ -259,16 +139,9 @@ def on_key_press(event):
         else:
             return part2
 
-    for oval in ovals:
-        canvas.delete(oval)
-    ovals = []
     start_move = 0
     contour[-1] = user_input
-    start_time = time.time()
-    resample(len(contour) - 1, contour[-1])
-    end_time = time.time()
-    print(end_time - start_time, 's')
-
+    resample(contour, tangent, length, len(contour) - 1, contour[-1])
     user_tck, user_u = splprep(np.array(user_input).T, k=3, s=100)
     ss = []
     dd = []
@@ -358,31 +231,96 @@ def on_key_press(event):
                 curve += contour[seq2[i-1][0]] if seq2[i-1][1] == 0 else list(reversed(contour[seq2[i-1][0]]))
             elif pair in complete_pair:
                 curve += complete(pair)
-    for p in curve:
-        y, x = p[0], p[1]
-        oval = canvas.create_oval(x, y, x, y, outline='red', fill='red', width=1)
-        ovals.append(oval)
+    return curve
 
+
+
+# 打开命名管道
+handle = win32file.CreateFile("\\\\.\\pipe\\MyPipe", 
+    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+    0, None, 
+    win32file.OPEN_EXISTING,
+    0, None)
+
+if handle == win32file.INVALID_HANDLE_VALUE:
+    print("CreateFile failed with error", win32api.GetLastError())
+    exit(1)
+
+print('连接成功')
+
+# 从管道读取图像的edge数据
+_, readData = win32file.ReadFile(handle, 4, None)
+
+# 输出收到的消息
+n = int.from_bytes(readData, byteorder='little', signed=True)
+print(f'{n}条边')
+cur = 1
+contour = []
+for i in range(n):
+    _, readData = win32file.ReadFile(handle, 4, None)
+    m = int.from_bytes(readData, byteorder='little', signed=True)
+    cur += 1
+    edge = []
+    for j in range(m):
+        _, readData = win32file.ReadFile(handle, 8, None)
+        x = int.from_bytes(readData[0:4], byteorder='little', signed=True)
+        cur += 1
+        y = int.from_bytes(readData[4:8], byteorder='little', signed=True)
+        cur += 1
+        edge.append([x, y])
+    contour.append(edge)
+print('ok1')
+
+try:
+    contour, tangent, length = pre(contour)
+except Exception as e:
+    print("pre函数出现了错误：", e)
+    traceback.print_exc()
+print('ok2')
+
+while True:
+    # 从管道读取用户输入轮廓数据
+    _, readData = win32file.ReadFile(handle, 4, None)
+    m = int.from_bytes(readData, byteorder='little', signed=True)
+    cur = 1
     user_input = []
-    print('ok')
+    for j in range(m):
+        _, readData = win32file.ReadFile(handle, 8, None)
+        x = int.from_bytes(readData[0:4], byteorder='little', signed=True)
+        cur += 1
+        y = int.from_bytes(readData[4:8], byteorder='little', signed=True)
+        cur += 1
+        user_input.append([x, y])
+    try:
+        curve = work(contour, tangent, length, user_input)
+    except Exception as e:
+        print("work函数出现了错误：", e)
+        traceback.print_exc()
+
+        
+    res = b''
+    res += len(curve).to_bytes(4, byteorder='little', signed=True)
+    for i in range(len(curve)):
+        x, y = round(curve[i][0]), round(curve[i][1])
+        res += x.to_bytes(4, byteorder='little', signed=True)
+        res += y.to_bytes(4, byteorder='little', signed=True)
+
+    # import matplotlib.pyplot as plt
+
+    # fig, ax = plt.subplots()
+    # H, W = 1000, 1000
+    # plt.xlim(0, W)
+    # plt.ylim(0, H)
+    # for i, edge in enumerate(contour):
+    #     x, y = np.array([edge[_][0] for _ in range(len(edge))]), np.array([edge[_][1] for _ in range(len(edge))])
+    #     ax.plot(y, H - x)
+    #     ax.text(np.mean(y) + 1, np.mean(H - x) + 1, f"{i}", ha="center", va="center", fontsize=12, color="red")
+    # ax.plot([p[1] for p in curve], [H - p[0] for p in curve], 'ro')
+    # plt.show()
+
+    win32file.WriteFile(handle, res)
+    
 
 
-def on_mouse_move(event):
-    global ovals
-    global start_move
-    x, y = event.x, event.y
-    user_input.append([y, x])
-    if start_move == 0:
-        start_move = 1
-        for oval in ovals:
-            canvas.delete(oval)
-        ovals = []
-    oval = canvas.create_oval(x, y, x, y, outline='red', fill='red', width=5)
-    ovals.append(oval)
-
-canvas.focus_set()
-canvas.bind('<B1-Motion>', on_mouse_move)
-canvas.bind('<Key>', on_key_press)
-
-
-win.mainloop()
+# 关闭管道句柄
+win32file.CloseHandle(handle)
